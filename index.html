@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>環興 - 異味通報網頁測試版</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body { margin: 0; padding: 0; font-family: "Microsoft JhengHei", sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        
+        .instruction {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 1000; background: rgba(255, 255, 255, 0.9);
+            padding: 10px 20px; border-radius: 25px; font-weight: bold; pointer-events: none;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2); border: 1px solid #ccc;
+        }
+
+        /* --- 核心修改：自適應寬度的骷髏頭徽章 --- */
+        .skull-badge {
+            position: relative;
+            display: inline-flex; /* 關鍵：讓容器隨內容長度伸縮 */
+            align-items: center;
+            justify-content: center;
+            background-color: white;
+            border: 2px solid black;
+            border-radius: 10px;
+            padding: 4px 8px; /* 內距確保 1 顆或 3 顆時都有呼吸空間 */
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+            white-space: nowrap;
+            /* 關鍵定位：
+               1. translate(-50%, -100%)：讓標籤水平置中，且底部位於座標點
+               2. margin-top：給下方的尖角預留顯示空間 
+            */
+            transform: translate(-50%, -100%);
+            margin-top: -10px; 
+        }
+
+        /* 尖角外框 */
+        .skull-badge::after {
+            content: '';
+            position: absolute;
+            bottom: -11px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-top: 10px solid black;
+        }
+
+        /* 尖角白色填充 */
+        .skull-badge::before {
+            content: '';
+            position: absolute;
+            bottom: -8px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 1;
+            width: 0;
+            height: 0;
+            border-left: 7px solid transparent;
+            border-right: 7px solid transparent;
+            border-top: 9px solid white;
+        }
+
+        .skull-text {
+            font-size: 24px;
+            line-height: 1;
+            margin: 0 1px;
+            z-index: 2;
+        }
+
+        /* 十字準心樣式 */
+        .crosshair-icon { 
+            font-size: 34px; color: #ff0000; font-weight: bold; 
+            text-shadow: 0 0 4px white, 0 0 4px white; 
+            display: flex; justify-content: center; align-items: center;
+        }
+
+        /* 彈窗樣式 */
+        .report-form { padding: 5px; min-width: 180px; }
+        .report-form select, .report-form button { width: 100%; margin-top: 10px; padding: 8px; border-radius: 4px; }
+        .report-form button { background: black; color: white; border: none; cursor: pointer; font-weight: bold; }
+        .report-time { font-size: 11px; color: #666; margin-top: 8px; border-top: 1px dashed #ccc; padding-top: 5px; }
+        
+        /* 移除 Leaflet 預設容器限制，讓 CSS 控制大小 */
+        .custom-skull-marker { width: 0 !important; height: 0 !important; }
+    </style>
+</head>
+<body>
+
+    <div class="instruction">📍 環興 - 異味通報網頁測試版</div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy } 
+               from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAHrh_ygy_4NKI8xYEssvOGkeMF--W4mjU",
+            authDomain: "odor--explore.firebaseapp.com",
+            databaseURL: "https://odor--explore-default-rtdb.asia-southeast1.firebasedatabase.app",
+            projectId: "odor--explore",
+            storageBucket: "odor--explore.firebasestorage.app",
+            messagingSenderId: "50345839778",
+            appId: "1:50345839778:web:9d144849e4bb3667efdbfb",
+            measurementId: "G-XJSZYW23S6"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        const map = L.map('map').setView([25.0330, 121.5654], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        let tempMarker = null;
+
+        map.on('click', function(e) {
+            const { lat, lng } = e.latlng;
+            if (tempMarker) map.removeLayer(tempMarker);
+
+            const crosshair = L.divIcon({
+                className: 'custom-crosshair',
+                html: `<div class="crosshair-icon">⊕</div>`,
+                iconSize: [30, 30], iconAnchor: [15, 15]
+            });
+
+            tempMarker = L.marker([lat, lng], { icon: crosshair }).addTo(map);
+            
+            const formHtml = `
+                <div class="report-form">
+                    <strong>通報此處異味</strong>
+                    <select id="popType">
+                        <option value="塑膠焦味">塑膠焦味</option>
+                        <option value="腐敗酸臭">腐敗酸臭</option>
+                        <option value="工業廢氣">工業廢氣</option>
+                    </select>
+                    <select id="popLevel">
+                        <option value="1">1 💀 (輕微)</option>
+                        <option value="2">2 💀💀 (明顯)</option>
+                        <option value="3">3 💀💀💀 (極臭)</option>
+                    </select>
+                    <button id="submitBtn">送出通報</button>
+                </div>
+            `;
+            tempMarker.bindPopup(formHtml).openPopup();
+
+            setTimeout(() => {
+                const btn = document.getElementById('submitBtn');
+                if(btn) {
+                    btn.onclick = () => {
+                        const type = document.getElementById('popType').value;
+                        const level = parseInt(document.getElementById('popLevel').value);
+                        sendData(lat, lng, type, level);
+                    };
+                }
+            }, 100);
+        });
+
+        async function sendData(lat, lng, type, level) {
+            try {
+                await addDoc(collection(db, "smell_reports"), {
+                    lat, lng, type, level, timestamp: new Date()
+                });
+                map.removeLayer(tempMarker);
+            } catch (e) {
+                alert("通報失敗");
+            }
+        }
+
+        // --- 核心：渲染隨內容伸縮的標籤 ---
+        onSnapshot(query(collection(db, "smell_reports"), orderBy("timestamp", "asc")), (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === "added") {
+                    const data = change.doc.data();
+                    const reportDate = data.timestamp ? new Date(data.timestamp.seconds * 1000).toLocaleString() : "未知時間";
+                    
+                    let skullsHtml = '';
+                    for(let i=0; i<data.level; i++) {
+                        skullsHtml += '<span class="skull-text">💀</span>';
+                    }
+
+                    const skullIcon = L.divIcon({
+                        className: 'custom-skull-marker', // 設為空殼，由內層 CSS 控制
+                        html: `<div class="skull-badge">${skullsHtml}</div>`,
+                        iconSize: null,   // 不限制大小
+                        iconAnchor: [0, 0] // 錨點由 CSS 的 transform: translate(-50%, -100%) 處理
+                    });
+
+                    L.marker([data.lat, data.lng], { icon: skullIcon })
+                     .addTo(map)
+                     .bindPopup(`
+                        <b>${data.type}</b><br>
+                        嚴重程度: ${data.level} 💀<br>
+                        <div class="report-time">通報時間：<br>${reportDate}</div>
+                     `);
+                }
+            });
+        });
+
+        map.locate({setView: true, maxZoom: 16});
+    </script>
+</body>
+</html>
