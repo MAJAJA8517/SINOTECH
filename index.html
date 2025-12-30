@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>環興 - 異味與採樣監測圖</title>
+    
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    
+    <style>
+        body { margin: 0; padding: 0; font-family: "Microsoft JhengHei", sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        
+        .instruction {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 1000; background: rgba(255, 255, 255, 0.9);
+            padding: 10px 20px; border-radius: 25px; font-weight: bold; pointer-events: none;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.2); border: 1px solid #ccc;
+        }
+
+        /* --- 標籤容器 --- */
+        .marker-badge {
+            position: relative;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background-color: white;
+            border-radius: 12px;
+            padding: 5px 12px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            white-space: nowrap;
+            transform: translate(-50%, -100%);
+            margin-top: -10px; 
+        }
+
+        /* 尖角 */
+        .marker-badge::after {
+            content: ''; position: absolute; bottom: -11px; left: 50%; transform: translateX(-50%);
+            width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent;
+        }
+
+        /* --- 1. 民眾通報樣式 --- */
+        .skull-style { border: 2px solid #333; }
+        .skull-style::after { border-top: 10px solid #333; }
+
+        /* --- 2. 蘇瑪罐樣式 (強化金屬感) --- */
+        .canister-style { 
+            border: 2px solid #546e7a; 
+            background: linear-gradient(135deg, #ffffff 0%, #e1f5fe 100%);
+        }
+        .canister-style::after { border-top: 10px solid #546e7a; }
+        
+        .canister-svg {
+            width: 28px; height: 32px;
+            margin-right: 8px;
+            display: flex; align-items: center;
+        }
+        .canister-label { color: #263238; font-weight: 800; font-size: 15px; }
+
+        .skull-icon-text { font-size: 22px; line-height: 1; }
+        .crosshair-icon { font-size: 34px; color: #ff0000; text-shadow: 0 0 4px white; display: flex; justify-content: center; }
+        
+        /* 彈窗 */
+        .report-form { padding: 5px; min-width: 180px; }
+        .report-form select, .report-form button { width: 100%; margin-top: 8px; padding: 8px; border-radius: 4px; }
+        .report-form button { background: #333; color: white; border: none; font-weight: bold; cursor: pointer; }
+        
+        .custom-marker-container { width: 0 !important; height: 0 !important; }
+    </style>
+</head>
+<body>
+
+    <div class="instruction">📍 環興 - 異味通報與採樣監測系統</div>
+    <div id="map"></div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getFirestore, collection, addDoc, onSnapshot, query, orderBy, getDocs } 
+               from "https://www.gstatic.com/firebasejs/10.7.1/firebase-firestore.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyAHrh_ygy_4NKI8xYEssvOGkeMF--W4mjU",
+            authDomain: "odor--explore.firebaseapp.com",
+            projectId: "odor--explore",
+            storageBucket: "odor--explore.firebasestorage.app",
+            messagingSenderId: "50345839778",
+            appId: "1:50345839778:web:9d144849e4bb3667efdbfb"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getFirestore(app);
+
+        // 初始化地圖 (預設縮放至台灣範圍)
+        const map = L.map('map').setView([25.0330, 121.5654], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(map);
+
+        // --- 蘇瑪罐 SVG 圖示 ---
+        const summaCanisterSvg = `
+            <svg viewBox="0 0 40 45" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M10 5 Q20 2 30 5" stroke="#90a4ae" stroke-width="2" fill="none"/>
+                <line x1="10" y1="5" x2="10" y2="20" stroke="#b0bec5" stroke-width="1.5"/>
+                <line x1="30" y1="5" x2="30" y2="20" stroke="#b0bec5" stroke-width="1.5"/>
+                <circle cx="20" cy="12" r="4" fill="#00bcd4" stroke="#00838f" stroke-width="1"/>
+                <rect x="19" y="16" width="2" height="6" fill="#78909c"/>
+                <circle cx="20" cy="30" r="12" fill="url(#metalGradient)" stroke="#546e7a" stroke-width="1"/>
+                <defs>
+                    <linearGradient id="metalGradient" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" style="stop-color:#eceff1" />
+                        <stop offset="50%" style="stop-color:#b0bec5" />
+                        <stop offset="100%" style="stop-color:#78909c" />
+                    </linearGradient>
+                </defs>
+            </svg>
+        `;
+
+        // 讀取 Firebase 採樣罐資料 (修正抓取 doc.id)
+        async function loadCanisters() {
+            try {
+                const querySnapshot = await getDocs(collection(db, "canisters"));
+                querySnapshot.forEach((doc) => {
+                    const data = doc.data();
+                    const canisterId = doc.id; // 這裡會抓到 can1, can2
+
+                    if (data.lat && data.lng) {
+                        const icon = L.divIcon({
+                            className: 'custom-marker-container',
+                            html: `
+                                <div class="marker-badge canister-style">
+                                    <div class="canister-svg">${summaCanisterSvg}</div>
+                                    <span class="canister-label">${canisterId}</span>
+                                </div>`,
+                            iconSize: null, iconAnchor: [0, 0]
+                        });
+                        
+                        L.marker([data.lat, data.lng], { icon: icon }).addTo(map)
+                         .bindPopup(`<b>空污監測設備</b><br>編號：${canisterId}<br>設備：Summa Canister`);
+                    }
+                });
+            } catch (e) { 
+                console.error("資料加載失敗：", e); 
+            }
+        }
+        loadCanisters();
+
+        // 即時監聽民眾異味通報
+        onSnapshot(query(collection(db, "smell_reports"), orderBy("timestamp", "asc")), (snapshot) => {
+            snapshot.docChanges().forEach((change) => {
+                if (change.type === "added") {
+                    const data = change.doc.data();
+                    let skulls = '';
+                    for(let i=0; i<data.level; i++) skulls += '💀';
+                    const icon = L.divIcon({
+                        className: 'custom-marker-container',
+                        html: `<div class="marker-badge skull-style"><span class="skull-icon-text">${skulls}</span></div>`,
+                        iconSize: null, iconAnchor: [0, 0]
+                    });
+                    L.marker([data.lat, data.lng], { icon: icon }).addTo(map)
+                     .bindPopup(`<b>${data.type}</b><br>程度: ${data.level} 💀<br>時間: ${data.timestamp?.toDate().toLocaleString() || '未知'}`);
+                }
+            });
+        });
+
+        // 地圖點擊：新增通報
+        let tempMarker = null;
+        map.on('click', (e) => {
+            const { lat, lng } = e.latlng;
+            if (tempMarker) map.removeLayer(tempMarker);
+            
+            tempMarker = L.marker([lat, lng], { 
+                icon: L.divIcon({ 
+                    className:'custom-crosshair', 
+                    html:'<div class="crosshair-icon">⊕</div>', 
+                    iconSize:[30,30], 
+                    iconAnchor:[15,15] 
+                }) 
+            }).addTo(map);
+
+            tempMarker.bindPopup(`
+                <div class="report-form">
+                    <strong>📍 新增異味通報</strong>
+                    <select id="popType">
+                        <option value="塑膠焦味">塑膠焦味</option>
+                        <option value="腐敗酸臭">腐敗酸臭</option>
+                        <option value="化學藥劑">化學藥劑</option>
+                        <option value="油煙異味">油煙異味</option>
+                    </select>
+                    <select id="popLevel">
+                        <option value="1">1 💀 (輕微)</option>
+                        <option value="2">2 💀💀 (明顯)</option>
+                        <option value="3">3 💀💀💀 (極臭)</option>
+                    </select>
+                    <button id="submitBtn">送出通報</button>
+                </div>`).openPopup();
+
+            // 處理按鈕點擊事件
+            setTimeout(() => {
+                const btn = document.getElementById('submitBtn');
+                if (btn) {
+                    btn.onclick = async () => {
+                        try {
+                            await addDoc(collection(db, "smell_reports"), {
+                                lat, lng, 
+                                type: document.getElementById('popType').value,
+                                level: parseInt(document.getElementById('popLevel').value),
+                                timestamp: new Date()
+                            });
+                            map.removeLayer(tempMarker);
+                            alert("通報已送出！");
+                        } catch (err) {
+                            alert("送出失敗，請檢查權限設定");
+                        }
+                    };
+                }
+            }, 100);
+        });
+
+        // 獲取使用者當前位置
+        map.locate({setView: true, maxZoom: 15});
+    </script>
+</body>
+</html>
